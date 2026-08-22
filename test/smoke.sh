@@ -55,10 +55,13 @@ echo "== $IMAGE =="
 # --- modules -----------------------------------------------------------------
 PASSARG=
 start -e IMQ_BROKER_MODE=promoter || bad "promoter starts" "container never answered PING"
-check "promoter mode loads the promoter module" \
-      "$(cli MODULE LIST | grep -c promoter)" "1"
-check "promoter mode does not load the unicaster" \
-      "$(cli MODULE LIST | grep -c unicaster)" "0"
+# Presence, not a line count: MODULE LIST prints the module's `path` as well as
+# its name, so a loaded `promoter` matches on two lines, not one.
+if cli MODULE LIST | grep -q promoter; then ok "promoter mode loads the promoter module"
+else bad "promoter mode loads the promoter module" "$(cli MODULE LIST)"; fi
+if cli MODULE LIST | grep -q unicaster; then
+    bad "promoter mode does not load the unicaster" "both announcers are loaded"
+else ok "promoter mode does not load the unicaster"; fi
 
 # The announcer is the entire point: a broker that starts but never announces is
 # invisible to every service that would discover it.
@@ -71,7 +74,12 @@ else
 fi
 
 start -e IMQ_BROKER_MODE=none || bad "none starts" "container never answered PING"
-check "IMQ_BROKER_MODE=none loads no module" "$(cli MODULE LIST | wc -l | tr -d ' ')" "0"
+# `wc -l` reports 1 for redis-cli's empty reply, so compare the collapsed text:
+# an empty MODULE LIST prints nothing, or "(empty array)" depending on version.
+mods=$(cli MODULE LIST | tr -d '[:space:]')
+if [ -z "$mods" ] || [ "$mods" = "(emptyarray)" ]; then
+    ok "IMQ_BROKER_MODE=none loads no module"
+else bad "IMQ_BROKER_MODE=none loads no module" "got: $mods"; fi
 
 check "both modules ship in every image" \
       "$(docker run --rm --entrypoint sh "$IMAGE" -c 'ls /usr/local/lib/redis_modules | tr "\n" " "')" \
