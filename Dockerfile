@@ -44,6 +44,18 @@ RUN set -eux; \
         libjson-c5; \
     rm -rf /var/lib/apt/lists/*
 
+# org.opencontainers.image.source is what links the GHCR package back to this
+# repository, so the package page shows the README and the licence rather than an
+# orphan blob. NOTE: it does NOT make the package public — GHCR packages are
+# private on first publish whatever the repository's visibility, and that is a
+# one-time change under the org's package settings.
+LABEL org.opencontainers.image.source="https://github.com/imqueue/redis-broker" \
+      org.opencontainers.image.description="Redis that announces itself — both @imqueue broker-discovery modules in one image, chosen at runtime with IMQ_BROKER_MODE" \
+      org.opencontainers.image.licenses="GPL-3.0-only" \
+      org.opencontainers.image.url="https://imqueue.org/blog/horizontally-scalable-redis-broker/" \
+      org.opencontainers.image.vendor="@imqueue" \
+      org.opencontainers.image.title="redis-broker"
+
 COPY --from=builder /src/promoter/promoter.so   /usr/local/lib/redis_modules/promoter.so
 COPY --from=builder /src/unicaster/unicaster.so /usr/local/lib/redis_modules/unicaster.so
 

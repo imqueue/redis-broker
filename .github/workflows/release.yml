@@ -29,6 +29,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
+          fetch-depth: 0        # git describe needs the tags, for the dispatch path
 
       # arm64 is not optional: the first thing anyone does with this image is
       # `docker run` it on a laptop, and most of those are Apple silicon.
@@ -41,9 +42,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # On a tag push GITHUB_REF_NAME is `v1.2.3`; on workflow_dispatch it is the
+      # BRANCH, which would publish `7.4-master`. Fall back to the newest tag so a
+      # manual re-run republishes the same version rather than inventing one.
       - id: meta
         run: |
-          v="${GITHUB_REF_NAME#v}"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then v="${GITHUB_REF_NAME#v}"
+          else v="$(git describe --tags --abbrev=0 | sed 's/^v//')"; fi
           echo "tags=${REGISTRY}/${IMAGE}:${{ matrix.redis }},${REGISTRY}/${IMAGE}:${{ matrix.redis }}-${v}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/build-push-action@v6
