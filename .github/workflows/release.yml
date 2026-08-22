@@ -1,0 +1,82 @@
+# Publishes to GHCR on a tag. GHCR rather than Docker Hub: no pull rate limits,
+# no separate account, and the package inherits the repository's visibility.
+#
+# The matrix here IS the support promise — every tag published is one this
+# project commits to rebuilding when a CVE lands in Redis or in a runtime
+# library. Adding a row is a maintenance commitment, not a convenience.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ${{ github.repository }}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        redis: ['7.2', '7.4']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # arm64 is not optional: the first thing anyone does with this image is
+      # `docker run` it on a laptop, and most of those are Apple silicon.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          echo "tags=${REGISTRY}/${IMAGE}:${{ matrix.redis }},${REGISTRY}/${IMAGE}:${{ matrix.redis }}-${v}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          build-args: REDIS_VERSION=${{ matrix.redis }}
+          tags: ${{ steps.meta.outputs.tags }}
+          push: true
+
+  # `latest` follows the newest Redis in the matrix above, published only after
+  # every matrix row succeeded.
+  latest:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          build-args: REDIS_VERSION=7.4
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:latest
+          push: true

@@ -1,0 +1,19 @@
+# The discovery datagram is unauthenticated: anyone who can send UDP to
+# 63000 can announce a broker into the fleet, or announce a real one away.
+# The namespace is the trust boundary, and this is what enforces it.
+# See THREAT-MODEL.md for what an attacker inside it can still do.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: imq-broker
+spec:
+  podSelector:
+    matchLabels: { app: imq-broker }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: REPLACE_WITH_YOUR_NAMESPACE }
+      ports:
+        - { protocol: TCP, port: 6379 }
+        - { protocol: UDP, port: 63000 }

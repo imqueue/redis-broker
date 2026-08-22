@@ -1,0 +1,67 @@
+# A unicaster broker fleet, for networks that drop broadcast — GCP VPCs, most
+# Kubernetes overlays. The service side is identical to the promoter recipe:
+# `clusterManagers: [new UDPClusterManager()]` either way.
+#
+# Apply deploy/unicaster/rbac.yaml first; without the ServiceAccount and Role the
+# container refuses to start rather than discovering nothing quietly.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: imq-broker
+spec:
+  serviceName: imq-broker
+  replicas: 3
+  selector:
+    matchLabels: { app: imq-broker }
+  template:
+    metadata:
+      labels: { app: imq-broker }
+    spec:
+      serviceAccountName: imq-broker
+      containers:
+        - name: redis
+          image: ghcr.io/imqueue/redis-broker:7.4
+          ports:
+            - { name: redis, containerPort: 6379 }
+            - { name: discovery, containerPort: 63000, protocol: UDP }
+          env:
+            - { name: IMQ_BROKER_MODE, value: unicaster }
+            # DEPLOYMENT_ENV is the NAMESPACE, despite the name — it is
+            # interpolated into /api/v1/namespaces/<here>/pods. Taken from the
+            # pod so it cannot drift from where this is actually running.
+            - name: DEPLOYMENT_ENV
+              valueFrom:
+                fieldRef: { fieldPath: metadata.namespace }
+            # Bind only on the pod network. Match this to your cluster's pod
+            # CIDR; a broker that announces a host or bridge address is
+            # discovered and then unreachable.
+            - { name: SELECTED_INTERFACES, value: "10." }
+            - { name: REDIS_BROADCAST_NAME, value: imq-broker }
+            - { name: IMQ_PERSISTENCE, value: rdb }
+            - name: IMQ_REQUIREPASS_FILE
+              value: /run/secrets/imq/password
+          volumeMounts:
+            - { name: secret, mountPath: /run/secrets/imq, readOnly: true }
+            - { name: data, mountPath: /data }
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "redis-cli -a \"$(cat /run/secrets/imq/password)\" --no-auth-warning ping"]
+            initialDelaySeconds: 2
+      volumes:
+        - name: secret
+          secret: { secretName: imq-broker-password }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 1Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: imq-broker
+spec:
+  clusterIP: None
+  selector: { app: imq-broker }
+  ports:
+    - { name: redis, port: 6379 }

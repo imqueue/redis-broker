@@ -1,0 +1,6 @@
+[submodule "modules/promoter"]
+	path = modules/promoter
+	url = https://github.com/imqueue/redis-broker-promoter.git
+[submodule "modules/unicaster"]
+	path = modules/unicaster
+	url = https://github.com/imqueue/redis-broker-unicaster.git

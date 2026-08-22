@@ -1,0 +1,32 @@
+# The unicaster asks the Kubernetes API for the pods in its own namespace and
+# unicasts the announcement datagram to each of them, because GCP VPCs and most
+# Kubernetes overlays drop broadcast.
+#
+# That is the only reason it needs any API access at all, so the Role grants
+# exactly `list` on `pods` and nothing else. Do not widen it: a broker that can
+# read secrets is a much larger blast radius for the same job.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: imq-broker
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: imq-broker-pod-lister
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: imq-broker-pod-lister
+subjects:
+  - kind: ServiceAccount
+    name: imq-broker
+roleRef:
+  kind: Role
+  name: imq-broker-pod-lister
+  apiGroup: rbac.authorization.k8s.io

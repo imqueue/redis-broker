@@ -1,0 +1,41 @@
+# Pull-request gate: build every supported Redis and run the smoke test against
+# each. The smoke test is the point — it asserts the properties this image claims
+# (the keyspace floor is set with no client involved, the config lock holds, an
+# invalid input is refused before Redis starts) rather than just that it boots.
+name: build
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        redis: ['7.2', '7.4']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build
+        run: docker build --build-arg REDIS_VERSION=${{ matrix.redis }} -t redis-broker:test .
+
+      - name: Smoke test
+        run: test/smoke.sh redis-broker:test
+
+  # Not published — see README, "Older Redis". This job exists so the claim that
+  # it still builds is checked rather than asserted, and it runs the same smoke
+  # test, because the version gate in entrypoint.sh is exactly what could break.
+  unsupported:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - run: docker build --build-arg REDIS_VERSION=6.2 -t redis-broker:6.2 .
+      - run: test/smoke.sh redis-broker:6.2

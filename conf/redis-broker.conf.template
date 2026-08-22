@@ -1,0 +1,33 @@
+# imqueue/redis-broker — the part of the config that is not negotiable.
+#
+# This file is the top of every composed config. entrypoint.sh appends the
+# env-driven directives after it, and the keyspace-event floor last of all.
+# Run the image with IMQ_PRINT_CONFIG=1 to see the finished result.
+#
+# Everything here carries a comment saying WHY, because this file is also the
+# documentation for anyone forking this image.
+
+# The queue lives in database 0 and nowhere else. @imqueue's watcher subscribes
+# to `__keyevent@0__:expired`, hardcoded, so delayed-message delivery only works
+# on db 0. Nothing below changes that; it is stated so a fork does not.
+databases 16
+
+# NOTE: enable-module-command / enable-protected-configs / enable-debug-command
+# are NOT here. They are Redis 7.0+ directives, and a 6.x server does not ignore
+# an unknown directive — it refuses to start with a FATAL CONFIG FILE ERROR. The
+# entrypoint emits them only when the running Redis is 7.0 or newer. On 6.x the
+# ACL rule it writes is the sole barrier against a runtime MODULE LOAD, which is
+# why that rule carries `-module` rather than relying on the server default.
+
+# Announcements and replies both cross the network; a broker that only answers
+# on loopback is discovered and then unreachable.
+protected-mode no
+bind 0.0.0.0
+
+# A broker holds queues, not sessions. An idle producer between bursts is normal
+# and must not be disconnected.
+timeout 0
+tcp-keepalive 300
+
+# Log to stdout so `docker logs` and a cluster log collector both work.
+logfile ""

@@ -1,0 +1,4 @@
+*.so
+dump.rdb
+appendonly.aof
+appendonlydir/
