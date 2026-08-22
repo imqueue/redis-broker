@@ -49,7 +49,26 @@ jobs:
         run: |
           if [ "$GITHUB_REF_TYPE" = tag ]; then v="${GITHUB_REF_NAME#v}"
           else v="$(git describe --tags --abbrev=0 | sed 's/^v//')"; fi
-          echo "tags=${REGISTRY}/${IMAGE}:${{ matrix.redis }},${REGISTRY}/${IMAGE}:${{ matrix.redis }}-${v}" >> "$GITHUB_OUTPUT"
+
+          # The immutable tag is always published. The FLOATING tag is published
+          # only when this is the newest version, because a floating tag must
+          # never move backwards.
+          #
+          # Learned the hard way on 2026-08-22: force-pushing v1.0.0/v1.0.1/v1.1.0
+          # re-triggered this workflow four times at once, the v1.0.0 run finished
+          # last, and it silently overwrote :7.2, :7.4 and :latest with a build
+          # predating the OCI labels. Re-cutting any old patch release would do the
+          # same thing without anyone force-pushing anything.
+          newest="$(git tag -l 'v*' | sort -V | tail -1)"
+          tags="${REGISTRY}/${IMAGE}:${{ matrix.redis }}-${v}"
+          if [ "v${v}" = "$newest" ]; then
+            tags="${tags},${REGISTRY}/${IMAGE}:${{ matrix.redis }}"
+            echo "newest=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "newest=no" >> "$GITHUB_OUTPUT"
+            echo "::notice::v${v} is not the newest tag ($newest) — publishing only the immutable tag, leaving :${{ matrix.redis }} alone"
+          fi
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
 
       - uses: docker/build-push-action@v6
         with:
@@ -71,14 +90,30 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+          fetch-depth: 0        # needs the tag list to know if this is newest
+
+      # Same guard as the publish job: :latest must never move backwards.
+      - id: guard
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          newest="$(git tag -l 'v*' | sort -V | tail -1)"
+          if [ "v${v}" = "$newest" ]; then echo "go=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=no" >> "$GITHUB_OUTPUT"
+            echo "::notice::v${v} is not the newest tag ($newest) — leaving :latest alone"
+          fi
+      - if: steps.guard.outputs.go == 'yes'
+        uses: docker/setup-qemu-action@v3
+      - if: steps.guard.outputs.go == 'yes'
+        uses: docker/setup-buildx-action@v3
+      - if: steps.guard.outputs.go == 'yes'
+        uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
+      - if: steps.guard.outputs.go == 'yes'
+        uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
