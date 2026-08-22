@@ -17,7 +17,7 @@ jobs:
       matrix:
         redis: ['7.2', '7.4']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - run: docker build --build-arg REDIS_VERSION=6.2 -t redis-broker:6.2 .
