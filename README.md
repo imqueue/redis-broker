@@ -213,10 +213,21 @@ only packages them.
 
 ## Licence
 
-GPL-3.0-only, or a commercial licence for closed-source distribution — the same
-as the rest of @imqueue. It is **not** AGPL: running it as a network service is
-not distribution, so internal services and SaaS carry no source-release
-obligation. <https://imqueue.com/license/>
+**ISC** — this repository and the two announcer modules it packages. Permissive:
+use it, change it, ship it inside anything, no source-release obligation and no
+commercial licence needed.
+
+That is deliberately *not* the rest of @imqueue, which is GPL-3.0-only with a
+commercial option (<https://imqueue.com/license/>). The broker layer is
+infrastructure you run rather than a library you build against, so the licence
+should never be a reason to hesitate over it.
+
+**What is in the image, and under what terms.** The `.so` modules and everything
+in this repository are ISC. The base image is the official `redis`, and Redis's
+own licence changed at 7.4: **7.2 is BSD-3-Clause**, while **7.4 is dual
+RSALv2 / SSPLv1**, which permits redistribution but restricts offering Redis
+itself as a managed service. If that distinction matters to you, build on 7.2 —
+`docker build --build-arg REDIS_VERSION=7.2 .` — or bring your own base.
 
 ## See also
 

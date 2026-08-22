@@ -40,7 +40,7 @@ release before reporting.
 
 ## Scope
 
-The `@imqueue` framework is open source under GPL-3.0. This policy covers the code
+This repository is open source under ISC; the wider `@imqueue` framework is GPL-3.0. This policy covers the code
 in the `@imqueue/*` packages and the project repositories. Vulnerabilities in
 third-party dependencies should be reported to those projects, though we're glad to
 help coordinate an upgrade.

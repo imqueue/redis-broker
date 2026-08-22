@@ -5,7 +5,8 @@ welcome — bug fixes, features, tests, and documentation.
 
 ## Contribution terms — please read first
 
-@imqueue is **dual-licensed**: it is free to everyone under **GPL-3.0**, and it is
+This repository is **ISC**, unlike most of @imqueue. The framework is
+**dual-licensed**: free to everyone under **GPL-3.0**, and it is
 also offered under **commercial licenses** for closed-source use. To make that
 sustainable, contributions are accepted under the
 **[@imqueue Contribution Terms](./CONTRIBUTION-TERMS.md)**.
@@ -14,7 +15,7 @@ sustainable, contributions are accepted under the
 terms.** In short:
 
 - You **keep the copyright** in your contribution.
-- Your contribution stays available to everyone under **GPL-3.0**.
+- Your contribution stays available to everyone under this repository's licence, **ISC**.
 - You grant the project owner the right to **also license your contribution
   commercially**, royalty-free — you will not receive a fee for it.
 

@@ -37,7 +37,7 @@ and you agree not to seek any such payment now or in the future.
 You **retain ownership** of the copyright in your Contribution and may use it
 elsewhere for your own purposes. You are granting the Owner the rights in Section
 1 — you are not required to transfer ownership. Your Contribution also remains
-available to the public under the repository's open-source license (GPL-3.0).
+available to the public under the repository's open-source license (ISC).
 
 ## 4. Patent license
 

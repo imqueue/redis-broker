@@ -51,7 +51,7 @@ RUN set -eux; \
 # one-time change under the org's package settings.
 LABEL org.opencontainers.image.source="https://github.com/imqueue/redis-broker" \
       org.opencontainers.image.description="Redis that announces itself — both @imqueue broker-discovery modules in one image, chosen at runtime with IMQ_BROKER_MODE" \
-      org.opencontainers.image.licenses="GPL-3.0-only" \
+      org.opencontainers.image.licenses="ISC" \
       org.opencontainers.image.url="https://imqueue.org/blog/horizontally-scalable-redis-broker/" \
       org.opencontainers.image.vendor="@imqueue" \
       org.opencontainers.image.title="redis-broker"

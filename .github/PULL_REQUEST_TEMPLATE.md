@@ -24,5 +24,5 @@
 - [ ] **I have read and agree to the [@imqueue Contribution Terms](../CONTRIBUTION-TERMS.md).**
       I grant the project owner the right to license my contribution
       **commercially, royalty-free**, my contribution stays available under
-      GPL-3.0, I keep my copyright, and I understand I will receive **no fee** for
+      ISC, I keep my copyright, and I understand I will receive **no fee** for
       it. If I did not agree, I would not be submitting this contribution.
