@@ -54,13 +54,21 @@ Environment variables compose a real `redis.conf`. Run with
 | `IMQ_REQUIREPASS_FILE` | — | Read the password from a file, so it stays out of `docker inspect` and the process environment |
 | `IMQ_ACL` | `auto` | `auto` \| `on` \| `off` — see *The config lock* |
 | `IMQ_MAXMEMORY` | — | `maxmemory`. The policy is always `noeviction` |
+| `IMQ_TLS` | `auto` | `auto` \| `on` \| `off`. `auto` turns TLS on as soon as a certificate is mounted |
+| `IMQ_TLS_CERT_FILE` | — | This broker's certificate |
+| `IMQ_TLS_KEY_FILE` | — | Its private key. Both are required together |
+| `IMQ_TLS_CA_FILE` | — | The CA whose **client** certificates this broker accepts |
+| `IMQ_TLS_KEY_PASSPHRASE_FILE` | — | Passphrase for an encrypted key, read from a file |
+| `IMQ_TLS_AUTH_CLIENTS` | `yes` | `yes` \| `no` \| `optional`. `yes` is mTLS and needs `IMQ_TLS_CA_FILE` |
+| `IMQ_TLS_PORT` | `6379` | `6380` when the plaintext listener stays up |
+| `IMQ_TLS_PLAINTEXT` | `off` | Keep the cleartext listener alongside TLS |
 | `IMQ_REDIS_CONF` | — | Path to your own config, included first so everything above overrides it |
 | `IMQ_PRINT_CONFIG` | `0` | Print the composed config and exit without starting Redis |
 
 The announcer modules read their own variables directly: `REDIS_BROADCAST_NAME`
 (default `imq-broker`), `REDIS_BROADCAST_PORT` (`63000`),
-`REDIS_BROADCAST_INTERVAL` (`1`), and — unicaster only — `SELECTED_INTERFACES`
-and `DEPLOYMENT_ENV`.
+`REDIS_BROADCAST_INTERVAL` (`1`), `REDIS_BROADCAST_TLS` (unset — see *TLS*), and
+— unicaster only — `SELECTED_INTERFACES` and `DEPLOYMENT_ENV`.
 
 > **`DEPLOYMENT_ENV` is the Kubernetes namespace**, despite the name. It is
 > interpolated into `/api/v1/namespaces/<value>/pods`, so a value like
@@ -137,6 +145,122 @@ like a network fault.
 Auth protects the data path only. It does not authenticate discovery; see
 [THREAT-MODEL.md](./THREAT-MODEL.md).
 
+### TLS
+
+Mount a certificate and a key, and the broker serves TLS. Nothing else changes:
+
+```bash
+docker run -v /path/to/tls:/run/tls:ro \
+           -e IMQ_TLS_CERT_FILE=/run/tls/broker.crt \
+           -e IMQ_TLS_KEY_FILE=/run/tls/broker.key \
+           -e IMQ_TLS_CA_FILE=/run/tls/ca.crt \
+           ghcr.io/imqueue/redis-broker:7.4
+```
+
+Three consequences, and they are the whole design:
+
+**The cleartext listener goes away.** Redis serves TLS by setting `port 0` and
+`tls-port <n>` — there is no "both" unless you ask for it with
+`IMQ_TLS_PLAINTEXT=on`.
+
+**The TLS port is 6379**, the port your Service, NetworkPolicy, probes and
+runbooks already name, so turning TLS on is one variable and no manifest churn.
+It becomes 6380 only when the plaintext listener stays up, because two listeners
+cannot share a port.
+
+**The announcement follows the listener.** `port 0` is how Redis is told to stop
+listening in cleartext, and the announcers used to advertise `port` verbatim — so
+a TLS broker announced `<ip>:0`, an address nothing can connect to, and one that
+`UDPClusterManager` discards as malformed. The fleet discovered no broker at all
+and no log said why. The modules now announce whichever listener is up, and mark
+the datagram `tls` or `plain`. When both are up, plaintext is announced, because
+that is what an already-running fleet is connected to; `REDIS_BROADCAST_TLS=1`
+picks the TLS port instead.
+
+Whatever you ask for, the container refuses to start rather than announcing a
+port that is not listening or serving cleartext where TLS was requested.
+
+#### Certificates, when the broker's address is not knowable in advance
+
+A broker gets its IP from the scheduler and announces it. Nothing can issue a
+certificate for that address ahead of time, and there is no name to use either —
+the fleet is found by announcement, not by DNS. So issue **one certificate for
+the fleet**, carrying a name that will never be resolved, and have clients pin
+that name:
+
+```bash
+openssl req -x509 -newkey rsa:4096 -nodes -days 3650 \
+    -subj /CN=imq-broker-ca -keyout ca.key -out ca.crt
+
+openssl req -newkey rsa:2048 -nodes -subj /CN=imq-broker.internal \
+    -keyout broker.key -out broker.csr
+openssl x509 -req -in broker.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+    -days 365 -extfile <(printf 'subjectAltName=DNS:imq-broker.internal') \
+    -out broker.crt
+```
+
+The service side, in `@imqueue/core`:
+
+```bash
+IMQ_REDIS_TLS_CA_FILE=/run/tls/ca.crt
+IMQ_REDIS_TLS_SERVERNAME=imq-broker.internal
+IMQ_REDIS_TLS_CERT_FILE=/run/tls/client.crt   # when IMQ_TLS_AUTH_CLIENTS=yes
+IMQ_REDIS_TLS_KEY_FILE=/run/tls/client.key
+```
+
+`servername` is not a hostname to connect to: Node compares it against the
+certificate and never resolves it, while the connection still goes to the
+announced IP. That is what decouples certificate identity from an address the
+scheduler owns — and it means a broker pod that dies and comes back on a
+different IP needs no new certificate.
+
+#### Client certificates
+
+`IMQ_TLS_AUTH_CLIENTS` is `yes` by default: every client must present a
+certificate signed by `IMQ_TLS_CA_FILE`. Encryption without it leaves the broker
+open to anyone who can reach the port, which — given the discovery channel is
+unauthenticated — is the half of the problem worth keeping. `no` encrypts
+without authenticating; `optional` accepts both and is a migration state, not a
+destination.
+
+#### Rotating certificates
+
+Both halves of the fleet read their material once, at start. Rotation is
+therefore a rolling restart, and the CAs have to overlap: distribute a CA bundle
+containing old and new, roll the brokers onto the new certificate, roll the
+services, then drop the old CA from the bundle.
+
+#### Turning it on for a fleet that is already running
+
+The announcement carries **one** transport for the whole fleet, so this is a
+cutover rather than an overlap: while the announcement says `plain`, a
+TLS-configured service cannot use it, and vice versa. Keep the window short:
+
+1. Brokers: certificates plus `IMQ_TLS_PLAINTEXT=on`. Both listeners are up, the
+   announcement is unchanged, and nothing in the fleet notices. Verify by hand
+   with `redis-cli --tls --cacert ca.crt --sni imq-broker.internal -p 6380 PING`.
+2. Roll the services with their TLS options, and the brokers with
+   `REDIS_BROADCAST_TLS=1`, together. Services reconnect over TLS as their
+   discovery refreshes.
+3. Drop `IMQ_TLS_PLAINTEXT` and `REDIS_BROADCAST_TLS`. The TLS listener moves
+   back to 6379 and is the only one left.
+
+The `tls`/`plain` marker on the datagram exists so that a client could one day
+choose per broker and make step 2 a rolling change; `@imqueue/core` does not read
+it today, and reading it would mean letting an unauthenticated datagram decide
+whether to encrypt — which is a decision that needs more than a UDP packet
+behind it.
+
+#### What TLS here does and does not cover
+
+It encrypts and authenticates the **data path** — the connection between a
+service and a broker. It does not authenticate **discovery**: the datagram is
+still unsigned, and a hostile one can still name any address. What changes is
+what an attacker gains by it: with `IMQ_TLS_AUTH_CLIENTS=yes` and a private CA, a
+broker at an announced address that cannot present a certificate from your CA
+gets no connection and no message. Read [THREAT-MODEL.md](./THREAT-MODEL.md) for
+the rest.
+
 ### Persistence
 
 `IMQ_PERSISTENCE=off` is the fastest and loses **every queued and every delayed
@@ -172,6 +296,12 @@ Three things are load-bearing; the rest are defaults:
   hardcoded;
 - **one password per fleet** — see *Authentication*.
 
+And one thing a fork has to keep in step: **whichever port is listening is the
+port that must be announced**. Compose `tls-port` yourself and the announcer
+still reads the running config, so it follows — but hand-writing `port 0` while
+expecting `port` to be advertised is the failure this image now refuses to
+produce.
+
 ## Tags
 
 `ghcr.io/imqueue/redis-broker:<redis-version>`, plus an immutable
@@ -189,9 +319,9 @@ pinned to it.
 Below 6.0 there is no ACL, so the config lock is unavailable; the image still
 runs and still sets the keyspace floor, and tells you what is unprotected.
 
-*TLS is deliberately out of scope for now. `tls-port` plus certificate mounting
-is a configuration surface of its own, and it would not cover the discovery
-channel either way.*
+TLS needs a Redis built with `BUILD_TLS=yes`, which the official images are from
+**6.2** on. On a build without it the image refuses to start rather than letting
+Redis die on an unknown directive.
 
 ## Building
 

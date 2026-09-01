@@ -12,8 +12,8 @@ or not.
 **Anyone who can send a UDP datagram to port 63000 on the discovery address can
 announce a broker `up`, or announce an existing broker `down`.** There is no
 signature, no shared secret and no sequence number on the datagram. It carries a
-name, a GUID, a status, a `host:port` and an interval, and any of them can be
-made up.
+name, a GUID, a status, a `host:port`, an interval and a transport marker, and
+any of them can be made up.
 
 Reaching the port is the whole of the attack. Nothing else is required — no
 credential, no prior connection, and no read access to anything.
@@ -53,6 +53,10 @@ the first is much more likely than the second.
 5. **`IMQ_REQUIREPASS_FILE` set.** It does not protect discovery — see §4 — but
    it means a hostile broker cannot also be *read* by the fleet, and a real
    broker cannot be read by whoever found the port.
+6. **TLS with client certificates** (`IMQ_TLS_*`, `IMQ_TLS_AUTH_CLIENTS=yes`).
+   It does not authenticate discovery either, and it is not required for the
+   argument in §4 to hold — but it is the control that makes a hostile
+   announcement close to useless: see §4.
 
 ## 4. Why this is acceptable
 
@@ -71,7 +75,20 @@ the datagram carries no credential and is never authenticated, so a password
 turns "an attacker can read your queues" into "an attacker can disrupt your
 routing". Both are worth preventing, and the same control prevents them.
 
+TLS does not change it either, but it moves the line further. With
+`IMQ_TLS_AUTH_CLIENTS=yes` and a CA that is yours, a broker announced at an
+attacker's address has to present a certificate signed by that CA before any
+client will send it a single message — so announcing a hostile broker stops
+being a way to *read* traffic and is only a way to *lose* it. The `down` attack
+in §2 is untouched: evicting a real broker needs no certificate.
+
 ## 5. What would change it
+
+The `tls`/`plain` marker on the datagram is **not** a signal to trust. It says
+which port was announced, so an operator and a log can tell; no client turns
+encryption on or off because of it, and none should — that would let an unsigned
+UDP packet decide whether a connection is encrypted, which is the whole of this
+section in reverse.
 
 There is **no signing, HMAC or nonce on the announcement today**, and adding one
 is not on the roadmap. It would need a shared secret distributed to every broker

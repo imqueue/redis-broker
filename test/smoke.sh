@@ -21,7 +21,12 @@ NAME=redis-broker-smoke-$$
 PASS=0; FAIL=0
 
 cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; }
-trap cleanup EXIT
+TLSARG=
+CERT_DIR=
+# NOT part of cleanup(): that one runs between tests, and the certificates have
+# to outlive it.
+drop_certs() { [ -z "$CERT_DIR" ] || rm -rf "$CERT_DIR"; CERT_DIR=; }
+trap 'cleanup; drop_certs' EXIT
 
 ok()   { PASS=$((PASS+1)); printf '  ok    %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf '  FAIL  %s\n         %s\n' "$1" "${2:-}"; }
@@ -32,12 +37,12 @@ start() {
     cleanup
     docker run -d --name "$NAME" "$@" "$IMAGE" >/dev/null || return 1
     for _ in $(seq 1 40); do
-        docker exec "$NAME" redis-cli ${PASSARG:-} PING 2>/dev/null | grep -q PONG && return 0
+        docker exec "$NAME" redis-cli ${TLSARG:-} ${PASSARG:-} PING 2>/dev/null | grep -q PONG && return 0
         sleep 0.25
     done
     return 1
 }
-cli() { docker exec "$NAME" redis-cli ${PASSARG:-} "$@" 2>&1; }
+cli() { docker exec "$NAME" redis-cli ${TLSARG:-} ${PASSARG:-} "$@" 2>&1; }
 
 # has_flags <expected chars> — set membership, not string equality
 has_flags() {
@@ -197,6 +202,185 @@ else bad "IMQ_PRINT_CONFIG does not start Redis" ""; fi
 start -e IMQ_BROKER_MODE=none
 perms=$(docker exec "$NAME" stat -c '%a %U' /etc/redis/redis-broker.conf)
 check "the composed config is root-owned and read-only" "$perms" "444 root"
+
+# --- TLS ---------------------------------------------------------------------
+# The certificate below is issued to a NAME and the broker is dialled at an
+# ADDRESS, deliberately: a broker gets its IP from the scheduler, so no
+# certificate can carry it, and clients pin the name with `servername` instead.
+# Nothing in this image depends on that — it is the client half — but the
+# certificates here are shaped the way real ones have to be.
+make_certs() {
+    CERT_DIR=$(mktemp -d)
+    openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=imq-smoke-ca \
+        -keyout "$CERT_DIR/ca.key" -out "$CERT_DIR/ca.crt" >/dev/null 2>&1
+    printf 'subjectAltName=DNS:imq-broker.internal\n' > "$CERT_DIR/ext"
+    openssl req -newkey rsa:2048 -nodes -subj /CN=imq-broker.internal \
+        -keyout "$CERT_DIR/server.key" -out "$CERT_DIR/server.csr" >/dev/null 2>&1
+    openssl x509 -req -in "$CERT_DIR/server.csr" -CA "$CERT_DIR/ca.crt" -CAkey "$CERT_DIR/ca.key" \
+        -CAcreateserial -days 1 -extfile "$CERT_DIR/ext" -out "$CERT_DIR/server.crt" >/dev/null 2>&1
+    openssl req -newkey rsa:2048 -nodes -subj /CN=imq-client \
+        -keyout "$CERT_DIR/client.key" -out "$CERT_DIR/client.csr" >/dev/null 2>&1
+    openssl x509 -req -in "$CERT_DIR/client.csr" -CA "$CERT_DIR/ca.crt" -CAkey "$CERT_DIR/ca.key" \
+        -CAcreateserial -days 1 -out "$CERT_DIR/client.crt" >/dev/null 2>&1
+    # uid 999 opens these, not root and not you — and it has to walk the
+    # directory to reach them, which a 0700 mktemp -d does not allow
+    chmod 0755 "$CERT_DIR"
+    chmod 0444 "$CERT_DIR"/*.crt "$CERT_DIR"/*.key
+}
+
+if ! command -v openssl >/dev/null 2>&1; then
+    printf '  skip  TLS (no openssl to issue test certificates)\n'
+else
+make_certs
+MOUNT="-v $CERT_DIR:/run/tls:ro"
+TLSENV="-e IMQ_TLS_CERT_FILE=/run/tls/server.crt -e IMQ_TLS_KEY_FILE=/run/tls/server.key -e IMQ_TLS_CA_FILE=/run/tls/ca.crt"
+CLIENT_TLS="--tls --cert /run/tls/client.crt --key /run/tls/client.key --cacert /run/tls/ca.crt --sni imq-broker.internal"
+
+# Mounting a certificate is the whole switch: no IMQ_TLS=on needed.
+conf=$(docker run --rm -e IMQ_PRINT_CONFIG=1 $MOUNT $TLSENV "$IMAGE" 2>/dev/null)
+if echo "$conf" | grep -q '^tls-port 6379$'; then
+    ok "a mounted certificate turns TLS on, on 6379 — no port change to deploy"
+else bad "a mounted certificate turns TLS on, on 6379" "$conf"; fi
+# The reason the announcers had to change: this line is what made them announce
+# ":0" and vanish from the fleet.
+if echo "$conf" | grep -q '^port 0$'; then
+    ok "TLS-only means 'port 0', which is what the announcer must not advertise"
+else bad "TLS-only means 'port 0'" "$conf"; fi
+
+TLSARG=$CLIENT_TLS
+start $MOUNT $TLSENV -e IMQ_BROKER_MODE=promoter || bad "a TLS broker starts" "container never answered PING"
+check "a client with a certificate is served over TLS" "$(cli PING)" "PONG"
+# mTLS is the default here, and a client without a certificate must not be
+# quietly accepted in cleartext or otherwise.
+# captured first, not piped: redis-cli exits non-zero here and `pipefail`
+# would report that rather than what grep found
+out=$(docker exec "$NAME" redis-cli PING 2>&1)
+case "$out" in
+    PONG) bad "the plaintext port is gone while TLS is on" "a cleartext client got a reply" ;;
+    *)    ok "the plaintext port is gone while TLS is on" ;;
+esac
+if docker logs "$NAME" 2>&1 | grep -q 'announcing port 6379 (tls)'; then
+    ok "the announcer advertises the TLS port, and says so at startup"
+else bad "the announcer advertises the TLS port" "$(docker logs "$NAME" 2>&1 | grep -i announc)"; fi
+
+# What actually goes on the wire. Host networking, a port nothing else uses, and
+# only the fields that matter — the source IP is whatever interface answered.
+if command -v python3 >/dev/null 2>&1; then
+    cleanup
+    docker run -d --name "$NAME" --network host $MOUNT $TLSENV \
+        -e IMQ_BROKER_MODE=promoter -e IMQ_TLS_PORT=7379 -e REDIS_BROADCAST_PORT=63111 \
+        -e REDIS_BROADCAST_NAME=imq-smoke "$IMAGE" >/dev/null 2>&1
+    datagram=$(timeout 8 python3 -c '
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("0.0.0.0", 63111))
+s.settimeout(6)
+try:
+    print(s.recvfrom(512)[0].decode())
+except Exception:
+    print("<no datagram>")
+')
+    case "$datagram" in
+        *":7379	1	tls") ok "the datagram carries the TLS port and is marked tls" ;;
+        *) bad "the datagram carries the TLS port and is marked tls" "got: $datagram" ;;
+    esac
+else
+    printf '  skip  the datagram carries the TLS port (no python3 to listen)\n'
+fi
+
+# Both listeners: the migration case. Plaintext keeps 6379 so nothing already
+# connected has to move, and TLS gets 6380.
+TLSARG=
+start $MOUNT $TLSENV -e IMQ_TLS_PLAINTEXT=on -e IMQ_BROKER_MODE=none || bad "both listeners start" "no PING"
+check "IMQ_TLS_PLAINTEXT=on keeps plaintext on 6379" "$(cli PING)" "PONG"
+TLSARG="$CLIENT_TLS -p 6380"
+check "and serves TLS on 6380 at the same time" "$(cli PING)" "PONG"
+TLSARG=
+
+# An encrypted key is a normal deployment shape, and its passphrase reaches Redis
+# through the composed config rather than the environment.
+openssl rsa -aes256 -in "$CERT_DIR/server.key" -out "$CERT_DIR/server.enc.key" \
+    -passout pass:s3cr3t >/dev/null 2>&1
+printf 's3cr3t' > "$CERT_DIR/keypass"
+chmod 0444 "$CERT_DIR/server.enc.key" "$CERT_DIR/keypass"
+TLSARG=$CLIENT_TLS
+start $MOUNT -e IMQ_TLS_CERT_FILE=/run/tls/server.crt \
+    -e IMQ_TLS_KEY_FILE=/run/tls/server.enc.key \
+    -e IMQ_TLS_KEY_PASSPHRASE_FILE=/run/tls/keypass \
+    -e IMQ_TLS_CA_FILE=/run/tls/ca.crt -e IMQ_BROKER_MODE=none \
+    || bad "an encrypted key starts" "container never answered PING"
+check "an encrypted key is unlocked from IMQ_TLS_KEY_PASSPHRASE_FILE" "$(cli PING)" "PONG"
+TLSARG=
+
+# --- TLS: what is refused before Redis starts --------------------------------
+out=$(docker run --rm $MOUNT -e IMQ_TLS_CERT_FILE=/run/tls/server.crt "$IMAGE" 2>&1); rc=$?
+if [ $rc -ne 0 ] && echo "$out" | grep -q "IMQ_TLS_KEY_FILE"; then
+    ok "a certificate without its key is refused"
+else bad "a certificate without its key is refused" "rc=$rc: $out"; fi
+
+out=$(docker run --rm $MOUNT -e IMQ_TLS_CERT_FILE=/run/tls/server.crt \
+      -e IMQ_TLS_KEY_FILE=/run/tls/server.key "$IMAGE" 2>&1); rc=$?
+if [ $rc -ne 0 ] && echo "$out" | grep -q "IMQ_TLS_AUTH_CLIENTS=no"; then
+    ok "asking for client certificates with no CA is refused, and says how to opt out"
+else bad "asking for client certificates with no CA is refused" "rc=$rc: $out"; fi
+
+out=$(docker run --rm $MOUNT -e IMQ_TLS_CERT_FILE=/run/tls/nope.crt \
+      -e IMQ_TLS_KEY_FILE=/run/tls/server.key -e IMQ_TLS_AUTH_CLIENTS=no "$IMAGE" 2>&1); rc=$?
+if [ $rc -ne 0 ] && echo "$out" | grep -q "does not exist"; then
+    ok "a certificate path that is not there is refused, not discovered by Redis"
+else bad "a missing certificate path is refused" "rc=$rc: $out"; fi
+
+# Root can read a 0600 root-owned mount; uid 999, which opens it, cannot.
+SECRET_KEY=$(mktemp -d); cp "$CERT_DIR/server.key" "$SECRET_KEY/server.key"; chmod 0600 "$SECRET_KEY/server.key"
+out=$(docker run --rm $MOUNT -v "$SECRET_KEY/server.key:/run/priv.key:ro" \
+      -e IMQ_TLS_CERT_FILE=/run/tls/server.crt -e IMQ_TLS_KEY_FILE=/run/priv.key \
+      -e IMQ_TLS_AUTH_CLIENTS=no "$IMAGE" 2>&1); rc=$?
+if [ $rc -ne 0 ] && echo "$out" | grep -q "uid 999"; then
+    ok "a key the redis user cannot read is refused, before Redis fails on it"
+else bad "an unreadable key is refused" "rc=$rc: $out"; fi
+rm -rf "$SECRET_KEY"
+
+out=$(docker run --rm -e REDIS_BROADCAST_TLS=1 "$IMAGE" 2>&1); rc=$?
+if [ $rc -ne 0 ] && echo "$out" | grep -q "no TLS listener to advertise"; then
+    ok "announcing a TLS port that does not exist is refused, not discovered in production"
+else bad "REDIS_BROADCAST_TLS=1 without TLS is refused" "rc=$rc: $out"; fi
+
+out=$(docker run --rm $MOUNT $TLSENV "$IMAGE" redis-server --tls-port 7000 2>&1); rc=$?
+if [ $rc -ne 0 ] && echo "$out" | grep -q "one decision"; then
+    ok "--tls-port on the command line is refused while TLS is on"
+else bad "--tls-port on the command line is refused" "rc=$rc: $out"; fi
+
+# Mounted material and IMQ_TLS=off: it starts, in cleartext, and says so.
+out=$(docker run --rm -e IMQ_PRINT_CONFIG=1 -e IMQ_TLS=off $MOUNT $TLSENV "$IMAGE" 2>&1); rc=$?
+if [ $rc -eq 0 ] && echo "$out" | grep -q "serves PLAINTEXT"; then
+    ok "IMQ_TLS=off with a certificate mounted warns rather than pretending"
+else bad "IMQ_TLS=off with a certificate mounted warns" "rc=$rc: $out"; fi
+
+# A Redis built without BUILD_TLS does not ignore `tls-port`, it dies on it — a
+# crash loop with a config error, out of a container that was handed a perfectly
+# good certificate. Stand in for such a build rather than hope never to meet one.
+SHIM=$(mktemp -d)
+cat > "$SHIM/redis-server" <<'SHIMEOF'
+#!/bin/sh
+for a in "$@"; do
+    [ "$a" = --version ] && { echo "Redis server v=7.4.0 sha=0:0 malloc=libc bits=64 build=0"; exit 0; }
+done
+echo "*** FATAL CONFIG FILE ERROR (Redis 7.4.0) ***"
+echo ">>> 'tls-port \"0\"'"
+echo "Bad directive or wrong number of arguments"
+exit 1
+SHIMEOF
+chmod 0755 "$SHIM/redis-server"
+out=$(docker run --rm $MOUNT $TLSENV -v "$SHIM/redis-server:/usr/local/bin/redis-server:ro" "$IMAGE" 2>&1); rc=$?
+if [ $rc -ne 0 ] && echo "$out" | grep -q "built without TLS support"; then
+    ok "a Redis with no TLS support is refused, not left to die on the directive"
+else bad "a Redis with no TLS support is refused" "rc=$rc: $out"; fi
+rm -rf "$SHIM"
+
+drop_certs
+fi
+
 
 echo
 echo "  $PASS passed, $FAIL failed"

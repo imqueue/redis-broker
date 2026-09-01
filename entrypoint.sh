@@ -69,6 +69,14 @@ IMQ_REQUIREPASS_FILE=${IMQ_REQUIREPASS_FILE:-}
 IMQ_REDIS_CONF=${IMQ_REDIS_CONF:-}
 IMQ_MAXMEMORY=${IMQ_MAXMEMORY:-}
 IMQ_PRINT_CONFIG=${IMQ_PRINT_CONFIG:-0}
+IMQ_TLS=${IMQ_TLS:-auto}
+IMQ_TLS_PORT=${IMQ_TLS_PORT:-}
+IMQ_TLS_CERT_FILE=${IMQ_TLS_CERT_FILE:-}
+IMQ_TLS_KEY_FILE=${IMQ_TLS_KEY_FILE:-}
+IMQ_TLS_KEY_PASSPHRASE_FILE=${IMQ_TLS_KEY_PASSPHRASE_FILE:-}
+IMQ_TLS_CA_FILE=${IMQ_TLS_CA_FILE:-}
+IMQ_TLS_AUTH_CLIENTS=${IMQ_TLS_AUTH_CLIENTS:-yes}
+IMQ_TLS_PLAINTEXT=${IMQ_TLS_PLAINTEXT:-off}
 
 # --- not our command: get out of the way -------------------------------------
 # `docker run … redis-cli`, `sh`, an init container running something else. Only
@@ -131,6 +139,131 @@ case "$IMQ_PERSISTENCE" in
     *) die "IMQ_PERSISTENCE='$IMQ_PERSISTENCE' is not one of: off, rdb, aof, both" ;;
 esac
 
+# --- transport ---------------------------------------------------------------
+# Redis serves TLS on `tls-port`, and turns the plaintext listener off with
+# `port 0`. Both announcer modules announce the port that is LISTENING, so a
+# TLS-only broker announces its tls-port; the two decisions are made here,
+# together, which is why --tls-* and --port on the command line are refused
+# while TLS is on.
+
+# Can this binary do TLS at all? `tls-port` is a directive only when Redis was
+# built with BUILD_TLS=yes; without it the server does not ignore the directive,
+# it dies with "Bad directive or wrong number of arguments" — a crash loop
+# instead of an answer. `--port 0 --tls-port 0` makes the server exit at once
+# ("Configured to not listen anywhere") either way, so the probe binds nothing
+# and leaves nothing behind.
+has_tls() {
+    case "$(redis-server --port 0 --tls-port 0 2>&1 || true)" in
+        *'Bad directive'*) return 1 ;;
+    esac
+    return 0
+}
+
+# Redis reads the certificate and the key AFTER dropping to uid 999, so a secret
+# mounted 0400 root-owned is readable here and unreadable there: the server exits
+# on a file this script just confirmed. Ask the question as the user who will
+# actually open it.
+readable_by_redis() {
+    if [ "$(id -u)" = 0 ] && command -v setpriv >/dev/null 2>&1 && id redis >/dev/null 2>&1; then
+        setpriv --reuid redis --regid redis --clear-groups test -r "$1"
+    else
+        [ -r "$1" ]
+    fi
+}
+
+case "$IMQ_TLS" in
+    auto)
+        if [ -n "$IMQ_TLS_CERT_FILE" ] || [ -n "$IMQ_TLS_KEY_FILE" ]; then USE_TLS=yes; else USE_TLS=no; fi ;;
+    on)  USE_TLS=yes ;;
+    off) USE_TLS=no ;;
+    *)   die "IMQ_TLS='$IMQ_TLS' is not one of: auto, on, off" ;;
+esac
+
+if [ "$USE_TLS" = no ]; then
+    # material mounted and nothing serving it is the exact failure this script
+    # exists to catch: the deployment looks encrypted and the wire is not
+    if [ -n "$IMQ_TLS_CERT_FILE$IMQ_TLS_KEY_FILE$IMQ_TLS_CA_FILE$IMQ_TLS_KEY_PASSPHRASE_FILE$IMQ_TLS_PORT" ]; then
+        note "WARNING: IMQ_TLS=off, so the IMQ_TLS_* variables set alongside it are
+  ignored and this broker serves PLAINTEXT on 'port'. Remove IMQ_TLS=off to
+  turn TLS on from the certificate you have already mounted."
+    fi
+else
+    has_tls || die "IMQ_TLS is on, but this redis-server was built without TLS support.
+  'tls-port' is not a directive here, and Redis treats an unknown directive as a
+  FATAL CONFIG FILE ERROR rather than ignoring it. Use an image built with
+  BUILD_TLS=yes — the official 'redis' images from 6.2 on are."
+
+    [ -n "$IMQ_TLS_CERT_FILE" ] && [ -n "$IMQ_TLS_KEY_FILE" ] || die \
+        "TLS needs BOTH IMQ_TLS_CERT_FILE and IMQ_TLS_KEY_FILE — this broker's own
+  certificate and its private key. IMQ_TLS_CA_FILE is a separate thing: it is
+  who this broker TRUSTS, and on its own it serves nothing."
+
+    for f in "$IMQ_TLS_CERT_FILE" "$IMQ_TLS_KEY_FILE" "$IMQ_TLS_CA_FILE" "$IMQ_TLS_KEY_PASSPHRASE_FILE"; do
+        [ -n "$f" ] || continue
+        [ -e "$f" ] || die "TLS material '$f' does not exist in this container. A Kubernetes secret
+  mounted at the wrong path is silent until Redis opens it."
+        readable_by_redis "$f" || die "TLS material '$f' is not readable by the 'redis' user (uid 999), which is
+  who opens it — Redis drops privileges before reading the certificate. Mount the
+  secret with 'defaultMode: 0444', or chown it to 999."
+    done
+
+    case "$IMQ_TLS_AUTH_CLIENTS" in
+        yes|no|optional) ;;
+        *) die "IMQ_TLS_AUTH_CLIENTS='$IMQ_TLS_AUTH_CLIENTS' is not one of: yes, no, optional" ;;
+    esac
+
+    if [ "$IMQ_TLS_AUTH_CLIENTS" != no ] && [ -z "$IMQ_TLS_CA_FILE" ]; then
+        die "IMQ_TLS_AUTH_CLIENTS=$IMQ_TLS_AUTH_CLIENTS asks every client for a certificate,
+  and without IMQ_TLS_CA_FILE there is nothing to check one against: Redis
+  refuses EVERY connection, including its own health check. Mount the CA that
+  signed your client certificates, or set IMQ_TLS_AUTH_CLIENTS=no to encrypt
+  without authenticating clients."
+    fi
+
+    # 6379 when it is the only listener, so TLS costs no manifest churn — the
+    # Service, the NetworkPolicy and the probes keep the port they already name.
+    # 6380 when plaintext stays up, because two listeners cannot share one port.
+    case "$IMQ_TLS_PLAINTEXT" in
+        on|off) ;;
+        *) die "IMQ_TLS_PLAINTEXT='$IMQ_TLS_PLAINTEXT' is not one of: on, off" ;;
+    esac
+    if [ -z "$IMQ_TLS_PORT" ]; then
+        if [ "$IMQ_TLS_PLAINTEXT" = on ]; then IMQ_TLS_PORT=6380; else IMQ_TLS_PORT=6379; fi
+    fi
+    case "$IMQ_TLS_PORT" in
+        ''|*[!0-9]*) die "IMQ_TLS_PORT='$IMQ_TLS_PORT' is not a port number" ;;
+    esac
+    [ "$IMQ_TLS_PORT" -gt 0 ] && [ "$IMQ_TLS_PORT" -le 65535 ] \
+        || die "IMQ_TLS_PORT='$IMQ_TLS_PORT' is out of range (1-65535)"
+
+    PASSPHRASE=
+    if [ -n "$IMQ_TLS_KEY_PASSPHRASE_FILE" ]; then
+        PASSPHRASE=$(cat "$IMQ_TLS_KEY_PASSPHRASE_FILE")
+        [ -n "$PASSPHRASE" ] || die "IMQ_TLS_KEY_PASSPHRASE_FILE='$IMQ_TLS_KEY_PASSPHRASE_FILE' is empty"
+        # it goes into the config as one unquoted argument, so whitespace would
+        # be read as the end of it and the key would fail to decrypt with a
+        # passphrase that looks right in the secret
+        case "$PASSPHRASE" in
+            *[!!-~]*|*' '*) die "the key passphrase must not contain whitespace or control characters" ;;
+        esac
+    fi
+fi
+
+# The announcer reads REDIS_BROADCAST_TLS itself, and answers a demand it cannot
+# meet by announcing NOTHING — which is a fleet-wide outage with only a log line
+# to show for it. It is decidable here, before Redis starts.
+case "${REDIS_BROADCAST_TLS:-}" in
+    1|yes|YES|true|TRUE|on|ON)
+        [ "$USE_TLS" = yes ] || die "REDIS_BROADCAST_TLS asks the announcer to advertise the TLS port, but TLS
+  is off, so there is no TLS listener to advertise and this broker would announce
+  nothing at all. Configure TLS, or drop REDIS_BROADCAST_TLS." ;;
+    0|no|NO|false|FALSE|off|OFF)
+        [ "$USE_TLS" = no ] || [ "$IMQ_TLS_PLAINTEXT" = on ] || die \
+            "REDIS_BROADCAST_TLS asks the announcer to advertise the plaintext port, but
+  TLS is on with IMQ_TLS_PLAINTEXT=off, so 'port' is 0 and there is nothing to
+  advertise. Set IMQ_TLS_PLAINTEXT=on to keep both listeners." ;;
+esac
+
 # --- resolve the secret ------------------------------------------------------
 SECRET=
 if [ -n "$IMQ_REQUIREPASS_FILE" ]; then
@@ -190,6 +323,10 @@ for arg in "$@"; do
             die "--loadmodule on the command line is refused: this image loads exactly one
   announcer, chosen with IMQ_BROKER_MODE. Two loaded announcers double-announce
   the same broker." ;;
+        --port|--tls-port|--tls-cert-file|--tls-key-file|--tls-ca-cert-file|--tls-auth-clients)
+            [ "$USE_TLS" = no ] || die "$arg on the command line is refused while TLS is on. Which ports listen and
+  which one is announced are one decision, composed together from IMQ_TLS_*; an
+  override here changes half of it. Use IMQ_TLS_PORT and IMQ_TLS_PLAINTEXT." ;;
     esac
 done
 
@@ -244,6 +381,27 @@ mkdir -p "$(dirname "$CONF")"
     fi
 
     echo ""
+    echo "# --- transport: IMQ_TLS=$IMQ_TLS"
+    if [ "$USE_TLS" = yes ]; then
+        echo "tls-port $IMQ_TLS_PORT"
+        if [ "$IMQ_TLS_PLAINTEXT" = on ]; then
+            echo "# plaintext stays up alongside TLS (IMQ_TLS_PLAINTEXT=on). The announcer"
+            echo "# advertises it unless REDIS_BROADCAST_TLS=1 says otherwise."
+        else
+            # not a disabled server: this is how Redis is told to serve TLS only,
+            # and it is why the announcer must read tls-port rather than port
+            echo "port 0"
+        fi
+        echo "tls-cert-file $IMQ_TLS_CERT_FILE"
+        echo "tls-key-file $IMQ_TLS_KEY_FILE"
+        [ -z "$PASSPHRASE" ] || echo "tls-key-file-pass $PASSPHRASE"
+        [ -z "$IMQ_TLS_CA_FILE" ] || echo "tls-ca-cert-file $IMQ_TLS_CA_FILE"
+        echo "tls-auth-clients $IMQ_TLS_AUTH_CLIENTS"
+    else
+        echo "# no TLS: this broker serves plaintext on 'port'. See README, 'TLS'."
+    fi
+
+    echo ""
     echo "# --- memory"
     [ -z "$IMQ_MAXMEMORY" ] || echo "maxmemory $IMQ_MAXMEMORY"
     echo "maxmemory-policy noeviction"
@@ -281,8 +439,13 @@ fi
 # --- banner ------------------------------------------------------------------
 # What actually took effect, so an operator reading logs never has to infer it.
 auth_state="off"; [ -z "$SECRET" ] || auth_state="on"
+tls_state="off"
+if [ "$USE_TLS" = yes ]; then
+    tls_state="on (tls-port $IMQ_TLS_PORT, auth-clients $IMQ_TLS_AUTH_CLIENTS)"
+    [ "$IMQ_TLS_PLAINTEXT" = off ] || tls_state="$tls_state + plaintext"
+fi
 lock_state="off"; [ "$USE_ACL" = no ] || lock_state="on (CONFIG SET, CONFIG REWRITE, MODULE LOAD denied)"
-note "redis $VER | mode=$IMQ_BROKER_MODE | keyspace-events=$FLAGS | persistence=$IMQ_PERSISTENCE | auth=$auth_state | config-lock=$lock_state"
+note "redis $VER | mode=$IMQ_BROKER_MODE | keyspace-events=$FLAGS | persistence=$IMQ_PERSISTENCE | auth=$auth_state | tls=$tls_state | config-lock=$lock_state"
 [ -n "$SECRET" ] || note "NOTE: no password is set. Every broker in one discovered fleet must share
   the same password, because per-entry cluster credentials are ignored client
   side — see README, 'Authentication'."

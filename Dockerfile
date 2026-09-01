@@ -65,9 +65,12 @@ COPY entrypoint.sh /usr/local/bin/redis-broker-entrypoint.sh
 RUN chmod 0755 /usr/local/bin/redis-broker-entrypoint.sh; \
     mkdir -p /etc/redis
 
-# 6379 is Redis. 63000/udp is where the announcer shouts, and where a service's
-# UDPClusterManager listens. Both are needed for discovery to work.
-EXPOSE 6379 63000/udp
+# 6379 is Redis — cleartext, or TLS in its place once IMQ_TLS_* is configured, so
+# turning TLS on moves no ports. 6380 is where the TLS listener goes when the
+# cleartext one stays up (IMQ_TLS_PLAINTEXT=on). 63000/udp is where the announcer
+# shouts, and where a service's UDPClusterManager listens. The announcer and the
+# port it announces are both needed for discovery to work.
+EXPOSE 6379 6380 63000/udp
 
 # Wraps the official entrypoint rather than replacing it: that script does uid
 # handling and argument rewriting this image has no business reimplementing.

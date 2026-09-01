@@ -36,12 +36,26 @@ spec:
             - { name: IMQ_PERSISTENCE, value: rdb }
             - name: IMQ_REQUIREPASS_FILE
               value: /run/secrets/imq/password
+            # --- TLS. Uncomment these four blocks together (env, volumeMount,
+            # volume, probe). The TLS listener REPLACES the plaintext one on the
+            # same port 6379, so the Service, the NetworkPolicy and the port
+            # names above stay exactly as they are, and the announcer advertises
+            # 6379 as before - now marked `tls`.
+            # - { name: IMQ_TLS_CERT_FILE, value: /run/tls/broker.crt }
+            # - { name: IMQ_TLS_KEY_FILE,  value: /run/tls/broker.key }
+            # - { name: IMQ_TLS_CA_FILE,   value: /run/tls/ca.crt }
           volumeMounts:
             - { name: secret, mountPath: /run/secrets/imq, readOnly: true }
             - { name: data, mountPath: /data }
+            # - { name: tls, mountPath: /run/tls, readOnly: true }
           readinessProbe:
             exec:
               command: ["sh", "-c", "redis-cli -a \"$(cat /run/secrets/imq/password)\" --no-auth-warning ping"]
+            # With TLS on, this command has to speak it too, or the pod never
+            # becomes ready and the fleet never sees the broker:
+            #   redis-cli --tls --cert /run/tls/client.crt --key /run/tls/client.key
+            #             --cacert /run/tls/ca.crt --sni imq-broker.internal
+            #             -a "$(cat /run/secrets/imq/password)" --no-auth-warning ping
             initialDelaySeconds: 2
       volumes:
         # One password for the WHOLE fleet. Per-entry cluster credentials are
@@ -49,6 +63,14 @@ spec:
         # then unreachable — see README, "Authentication".
         - name: secret
           secret: { secretName: imq-broker-password }
+        # The certificate names the FLEET, not this pod: a broker's IP comes from
+        # the scheduler, so no certificate can carry it. Issue one for
+        # CN=imq-broker.internal and have clients pin it with
+        # IMQ_REDIS_TLS_SERVERNAME - that name is compared, never resolved.
+        # defaultMode 0444 matters: Redis reads the key as uid 999, after
+        # dropping privileges, and a root-only 0400 mount is unreadable there.
+        # - name: tls
+        #   secret: { secretName: imq-broker-tls, defaultMode: 0444 }
   volumeClaimTemplates:
     - metadata: { name: data }
       spec:
