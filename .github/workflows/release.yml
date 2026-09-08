@@ -120,3 +120,44 @@ jobs:
           build-args: REDIS_VERSION=7.4
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:latest
           push: true
+
+  # The GitHub Release is a separate object from the tag, and it — not the tag
+  # list — is what the repository page and the API call "Latest". Cutting a tag
+  # without one leaves the front page advertising an older version: v1.2.0 was
+  # tagged and published on 2026-09-01 and the page still offered v1.1.1.
+  #
+  # Runs after the images, so a release never advertises a version that cannot
+  # be pulled yet.
+  github-release:
+    needs: [publish, latest]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0        # needs the tag list to know if this is newest
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Same guard as the jobs above: re-cutting an older tag gets its own
+          # release, but must not take "Latest" away from a newer one.
+          newest="$(git tag -l 'v*' | sort -V | tail -1)"
+          if [ "$GITHUB_REF_NAME" = "$newest" ]; then latest=true
+          else
+            latest=false
+            echo "::notice::$GITHUB_REF_NAME is not the newest tag ($newest) — publishing it as an older release"
+          fi
+
+          # Notes written by hand are better than generated ones, so an existing
+          # release is left exactly as it is; this only guarantees one exists.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "::notice::$GITHUB_REF_NAME already has a release — leaving it alone"
+            exit 0
+          fi
+
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --latest="$latest"
