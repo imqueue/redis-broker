@@ -94,16 +94,15 @@ case "$IMQ_BROKER_MODE" in
 esac
 
 if [ "$IMQ_BROKER_MODE" = unicaster ]; then
-    # DEPLOYMENT_ENV is interpolated straight into
-    #   https://kubernetes.default.svc/api/v1/namespaces/%s/pods
-    # with an empty-string fallback, so unset means a request to /namespaces//pods
-    # that finds no peers and reports no error. It is a NAMESPACE despite the name.
+    # DEPLOYMENT_ENV is the namespace whose pods are announced to, interpolated
+    # into https://kubernetes.default.svc/api/v1/namespaces/%s/pods. The module
+    # falls back to the pod's own namespace when it is unset, but this image
+    # wants it stated: a name like 'production' that is not the namespace
+    # points the broker at pods it does not serve. A NAMESPACE despite the name.
     [ -n "${DEPLOYMENT_ENV:-}" ] || die \
         "IMQ_BROKER_MODE=unicaster needs DEPLOYMENT_ENV, which is the KUBERNETES
   NAMESPACE this broker runs in — not an environment name like 'production',
-  unless your namespace is literally called that. Unset, the module asks the API
-  for /api/v1/namespaces//pods, discovers nothing, and says nothing.
-  Set it from the pod itself:
+  unless your namespace is literally called that. Set it from the pod itself:
       env:
         - name: DEPLOYMENT_ENV
           valueFrom: { fieldRef: { fieldPath: metadata.namespace } }"

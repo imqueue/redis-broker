@@ -68,13 +68,23 @@ Environment variables compose a real `redis.conf`. Run with
 The announcer modules read their own variables directly: `REDIS_BROADCAST_NAME`
 (default `imq-broker`), `REDIS_BROADCAST_PORT` (`63000`),
 `REDIS_BROADCAST_INTERVAL` (`1`), `REDIS_BROADCAST_TLS` (unset — see *TLS*), and
-— unicaster only — `SELECTED_INTERFACES` and `DEPLOYMENT_ENV`.
+— unicaster only — `SELECTED_INTERFACES`, `DEPLOYMENT_ENV`,
+`REDIS_BROADCAST_PODS_REFRESH` (`5`, seconds between two pod list requests),
+`REDIS_BROADCAST_PODS_TIMEOUT` (`5`, seconds one request may take) and
+`REDIS_BROADCAST_PODS_MAX_AGE` (unset — keep announcing to the last list for
+as long as requests fail).
+
+The unicaster keeps the last pod list the Kubernetes API returned and announces
+to it; only a successful request replaces it. An API that hangs, refuses or
+throttles delays noticing new pods, but no longer silences the broker and
+disconnects the fleet. See the
+[module's README](https://github.com/imqueue/redis-broker-unicaster#pod-list).
 
 > **`DEPLOYMENT_ENV` is the Kubernetes namespace**, despite the name. It is
 > interpolated into `/api/v1/namespaces/<value>/pods`, so a value like
-> `production` is only correct if that is literally your namespace. Unset, the
-> module requests `/namespaces//pods`, discovers nothing, and reports nothing —
-> which is why this image refuses to start without it.
+> `production` is only correct if that is literally your namespace. The module
+> falls back to the pod's own namespace when it is unset, but this image refuses
+> to start without it, so the namespace is stated rather than guessed.
 
 ### Keyspace events are a startup decision
 
