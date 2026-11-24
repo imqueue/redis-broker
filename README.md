@@ -80,6 +80,14 @@ throttles delays noticing new pods, but no longer silences the broker and
 disconnects the fleet. See the
 [module's README](https://github.com/imqueue/redis-broker-unicaster#pod-list).
 
+Both announcers go quiet while Redis itself is stuck. The announcement is sent
+from a thread of its own, so it used to carry on while the main thread was
+blocked — a long command, a hung event loop — and services kept routing to a
+broker that answered nothing. `up` is now sent only while Redis's server cron
+has run within the last 2 × `REDIS_BROADCAST_INTERVAL` + 2 seconds (4 s by
+default); once it has not, the announcements stop, services drop the broker when
+its heartbeats lapse, and it is announced again as soon as Redis recovers.
+
 > **`DEPLOYMENT_ENV` is the Kubernetes namespace**, despite the name. It is
 > interpolated into `/api/v1/namespaces/<value>/pods`, so a value like
 > `production` is only correct if that is literally your namespace. The module
