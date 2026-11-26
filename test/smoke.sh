@@ -132,6 +132,24 @@ if cli MODULE LOAD /tmp/x.so | grep -Eq 'NOPERM|not allowed'; then
     ok "MODULE LOAD at runtime is refused"
 else bad "MODULE LOAD at runtime is refused" "$(cli MODULE LOAD /tmp/x.so)"; fi
 
+# --- the eviction policy ----------------------------------------------------
+start -e IMQ_BROKER_MODE=none -e IMQ_MAXMEMORY_POLICY=allkeys-lru
+if cli CONFIG GET maxmemory-policy | grep -q allkeys-lru; then
+    ok "a cache (IMQ_BROKER_MODE=none) evicts by the policy it is given"
+else bad "a cache evicts by the policy it is given" "$(cli CONFIG GET maxmemory-policy)"; fi
+
+for mode in promoter unicaster; do
+    out=$(docker run --rm -e IMQ_BROKER_MODE=$mode -e DEPLOYMENT_ENV=x -e IMQ_MAXMEMORY_POLICY=allkeys-lru "$IMAGE" 2>&1); rc=$?
+    if [ $rc -ne 0 ] && echo "$out" | grep -q "refused for a broker"; then
+        ok "a $mode broker given an evicting policy refuses to start"
+    else bad "a $mode broker given an evicting policy refuses to start" "rc=$rc: $out"; fi
+done
+
+out=$(docker run --rm -e IMQ_BROKER_MODE=none -e IMQ_MAXMEMORY_POLICY=sometimes "$IMAGE" 2>&1); rc=$?
+if [ $rc -ne 0 ] && echo "$out" | grep -q "not a Redis maxmemory-policy"; then
+    ok "an unknown eviction policy is refused before Redis starts"
+else bad "an unknown eviction policy is refused before Redis starts" "rc=$rc: $out"; fi
+
 start -e IMQ_BROKER_MODE=none -e IMQ_ACL=off
 if [ "$(cli CONFIG SET appendfsync everysec)" = "OK" ]; then
     ok "IMQ_ACL=off releases the lock, as documented"

@@ -53,7 +53,8 @@ Environment variables compose a real `redis.conf`. Run with
 | `IMQ_REQUIREPASS` | — | Redis password. Prefer the `_FILE` form |
 | `IMQ_REQUIREPASS_FILE` | — | Read the password from a file, so it stays out of `docker inspect` and the process environment |
 | `IMQ_ACL` | `auto` | `auto` \| `on` \| `off` — see *The config lock* |
-| `IMQ_MAXMEMORY` | — | `maxmemory`. The policy is always `noeviction` |
+| `IMQ_MAXMEMORY` | — | `maxmemory` |
+| `IMQ_MAXMEMORY_POLICY` | `noeviction` | `maxmemory-policy`. Anything but `noeviction` is refused unless `IMQ_BROKER_MODE=none` |
 | `IMQ_TLS` | `auto` | `auto` \| `on` \| `off`. `auto` turns TLS on as soon as a certificate is mounted |
 | `IMQ_TLS_CERT_FILE` | — | This broker's certificate |
 | `IMQ_TLS_KEY_FILE` | — | Its private key. Both are required together |
@@ -289,9 +290,15 @@ Redis defaults it to `yes`, which turns a failed background save — a full disk
 bad volume permission — into a refusal of *all writes* while reads keep
 answering: a total producer outage on a queue that still looks alive.
 
-`maxmemory-policy` is always `noeviction`, and `--maxmemory-policy` on the
-command line is refused. Under any `allkeys-*` policy Redis evicts queue keys,
-and messages disappear with no error on either side.
+A broker's `maxmemory-policy` is always `noeviction`, and `--maxmemory-policy`
+on the command line is refused. Under any evicting policy Redis evicts queue
+keys, and messages disappear with no error on either side.
+
+A cache — the same image with `IMQ_BROKER_MODE=none`, which announces nothing
+and so is never handed queue traffic — may set `IMQ_MAXMEMORY_POLICY`, such as
+`allkeys-lru`. Everything in a cache can be rebuilt, and at `maxmemory` with
+`noeviction` it refuses every write instead, which reads to its clients as an
+outage. Any evicting policy with a broker mode is refused at start.
 
 ## Using this as a base
 

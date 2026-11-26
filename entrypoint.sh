@@ -68,6 +68,7 @@ IMQ_REQUIREPASS=${IMQ_REQUIREPASS:-}
 IMQ_REQUIREPASS_FILE=${IMQ_REQUIREPASS_FILE:-}
 IMQ_REDIS_CONF=${IMQ_REDIS_CONF:-}
 IMQ_MAXMEMORY=${IMQ_MAXMEMORY:-}
+IMQ_MAXMEMORY_POLICY=${IMQ_MAXMEMORY_POLICY:-noeviction}
 IMQ_PRINT_CONFIG=${IMQ_PRINT_CONFIG:-0}
 IMQ_TLS=${IMQ_TLS:-auto}
 IMQ_TLS_PORT=${IMQ_TLS_PORT:-}
@@ -91,6 +92,21 @@ shift
 case "$IMQ_BROKER_MODE" in
     promoter|unicaster|none) ;;
     *) die "IMQ_BROKER_MODE='$IMQ_BROKER_MODE' is not one of: promoter, unicaster, none" ;;
+esac
+
+# --- validate the eviction policy --------------------------------------------
+# A broker never evicts: under any evicting policy Redis drops queue keys under
+# memory pressure, and messages vanish with no error on either side. A cache
+# (IMQ_BROKER_MODE=none, no announcer, never in the broker rotation) holds only
+# what can be rebuilt, and refusing every write once it is full is the worse
+# failure there.
+case "$IMQ_MAXMEMORY_POLICY" in
+    noeviction) ;;
+    allkeys-lru|allkeys-lfu|allkeys-random|volatile-lru|volatile-lfu|volatile-random|volatile-ttl)
+        [ "$IMQ_BROKER_MODE" = none ] || die "IMQ_MAXMEMORY_POLICY=$IMQ_MAXMEMORY_POLICY is refused for a broker
+  (IMQ_BROKER_MODE=$IMQ_BROKER_MODE): an evicting policy drops queue keys, and
+  messages vanish with no error. Only a cache, IMQ_BROKER_MODE=none, may evict." ;;
+    *) die "IMQ_MAXMEMORY_POLICY='$IMQ_MAXMEMORY_POLICY' is not a Redis maxmemory-policy" ;;
 esac
 
 if [ "$IMQ_BROKER_MODE" = unicaster ]; then
@@ -317,7 +333,8 @@ for arg in "$@"; do
         --maxmemory-policy)
             die "--maxmemory-policy on the command line is refused. An evicting policy lets
   Redis drop queue keys under memory pressure, and messages vanish with no error
-  on either side. This image pins 'noeviction'." ;;
+  on either side. A broker is pinned to 'noeviction'; a cache
+  (IMQ_BROKER_MODE=none) sets IMQ_MAXMEMORY_POLICY." ;;
         --loadmodule)
             die "--loadmodule on the command line is refused: this image loads exactly one
   announcer, chosen with IMQ_BROKER_MODE. Two loaded announcers double-announce
@@ -403,7 +420,7 @@ mkdir -p "$(dirname "$CONF")"
     echo ""
     echo "# --- memory"
     [ -z "$IMQ_MAXMEMORY" ] || echo "maxmemory $IMQ_MAXMEMORY"
-    echo "maxmemory-policy noeviction"
+    echo "maxmemory-policy $IMQ_MAXMEMORY_POLICY"
 
     echo ""
     echo "# --- authentication and the config lock"
